@@ -454,7 +454,8 @@ void TycoonRoom::handle_question_answered(blueboat::Client &client,
   assign_next_question(client, *state);
   client.send("STATE_UPDATE",
               Value{{"type", "STREAK_AMOUNT"}, {"value", state->streak}});
-  send_balance_change(client, *state);
+  client.send("STATE_UPDATE",
+              Value{{"type", "BALANCE_CHANGE"}, {"value", balance_change}});
 
   broadcast_leaderboard();
 }
