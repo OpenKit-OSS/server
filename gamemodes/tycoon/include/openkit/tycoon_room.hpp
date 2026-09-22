@@ -40,6 +40,14 @@ struct PlayerState {
   int question_index = 0;
 
   std::optional<std::chrono::steady_clock::time_point> frozen_until;
+
+  double next_question_multiplier = 1.0;
+
+  std::optional<std::chrono::steady_clock::time_point> income_boost_until;
+  double income_boost_factor = 1.0;
+
+  std::optional<std::chrono::steady_clock::time_point> discount_until;
+  double discount_factor = 0.0;
 };
 
 class TycoonRoom : public blueboat::Room {

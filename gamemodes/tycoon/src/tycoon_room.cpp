@@ -209,8 +209,15 @@ Value TycoonRoom::compute_balance_change(const PlayerState &state) const {
       upgrade_value(*catalog_.find_by_name(catalog_.upgrades(), "Insurance"),
                     state.upgrade_levels.at("insurance"));
 
-  long long if_correct = round_to_ll(
-      (money_per_question + state.streak * streak_bonus) * multiplier);
+  double effective_multiplier = multiplier * state.next_question_multiplier;
+  auto now = std::chrono::steady_clock::now();
+  if (state.income_boost_until && now < *state.income_boost_until) {
+    effective_multiplier *= state.income_boost_factor;
+  }
+
+  long long if_correct =
+      round_to_ll((money_per_question + state.streak * streak_bonus) *
+                  effective_multiplier);
   long long if_incorrect = -round_to_ll(money_per_question * insurance);
 
   return Value{{"balanceChangeIfCorrect", if_correct},
@@ -296,6 +303,7 @@ void TycoonRoom::handle_question_answered(blueboat::Client &client,
   }
 
   state->max_balance = std::max(state->max_balance, state->balance);
+  state->next_question_multiplier = 1.0;
 
   client.send("STATE_UPDATE",
               Value{{"type", "BALANCE"}, {"value", state->balance}});
@@ -337,6 +345,11 @@ void TycoonRoom::handle_upgrade_purchased(blueboat::Client &client,
   }
 
   long long price = upgrade_price(*upgrade_def, next_level);
+  if (state->discount_until &&
+      std::chrono::steady_clock::now() < *state->discount_until) {
+    price = round_to_ll(static_cast<double>(price) *
+                        (1.0 - state->discount_factor));
+  }
   if (state->balance < price) {
     return;
   }
@@ -458,7 +471,33 @@ void TycoonRoom::handle_powerup_activated(blueboat::Client &client,
     return;
   }
 
-  // TODO: Rebooter, Minute To Win It, Discounter, Mini/Mega Bonus
+  auto now = std::chrono::steady_clock::now();
+
+  if (powerup_name == "Mini Bonus") {
+    state->next_question_multiplier = 2.0;
+    send_balance_change(client, *state);
+  } else if (powerup_name == "Mega Bonus") {
+    state->next_question_multiplier = 5.0;
+    send_balance_change(client, *state);
+  } else if (powerup_name == "minuteMoreEarnings") {
+    state->income_boost_until = now + std::chrono::seconds(60);
+    state->income_boost_factor = 2.0;
+    send_balance_change(client, *state);
+  } else if (powerup_name == "Discounter") {
+    state->discount_until = now + std::chrono::minutes(5);
+    state->discount_factor = 0.25;
+  } else if (powerup_name == "repurchasePowerups") {
+    std::vector<std::string> restored;
+    for (const auto &used : state->used_powerups) {
+      if (used != powerup_name) {
+        restored.push_back(used);
+      }
+    }
+    state->purchased_powerups.insert(state->purchased_powerups.end(),
+                                     restored.begin(), restored.end());
+    client.send("STATE_UPDATE", Value{{"type", "PURCHASED_POWERUPS"},
+                                      {"value", state->purchased_powerups}});
+  }
 }
 
 void TycoonRoom::handle_powerup_attack(blueboat::Client &client,
@@ -501,13 +540,33 @@ void TycoonRoom::handle_powerup_attack(blueboat::Client &client,
   client.send("STATE_UPDATE", Value{{"type", "USED_POWERUPS"},
                                     {"value", attacker_state->used_powerups}});
 
+  auto now = std::chrono::steady_clock::now();
   bool full_screen = false;
   std::string verb = "Attacked";
   if (powerup_name == "Icer") {
-    target_state->frozen_until =
-        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    target_state->frozen_until = now + std::chrono::seconds(15);
     full_screen = true;
     verb = "Froze";
+  } else if (powerup_name == "Subtractor") {
+    long long removed =
+        round_to_ll(static_cast<double>(target_state->balance) * 0.20);
+    target_state->balance -= removed;
+    target_client->send(
+        "STATE_UPDATE",
+        Value{{"type", "BALANCE"}, {"value", target_state->balance}});
+    verb = "Subtracted from";
+  } else if (powerup_name == "Giving") {
+    long long given =
+        round_to_ll(static_cast<double>(target_state->balance) * 0.25);
+    target_state->balance += given;
+    target_client->send(
+        "STATE_UPDATE",
+        Value{{"type", "BALANCE"}, {"value", target_state->balance}});
+    verb = "Gifted";
+  } else if (powerup_name == "Blurred Screen") {
+    verb = "Blurred";
+  } else if (powerup_name == "outnumbered") {
+    verb = "Outnumbered";
   }
 
   target_client->send(
