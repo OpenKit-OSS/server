@@ -12,12 +12,15 @@
 namespace openkit {
 
 using RoomFactory = std::function<std::unique_ptr<blueboat::Room>(
-    Catalog, Value default_questions, Value default_game_options, IntentRegistry &)>;
+    Catalog, Value default_questions, Value default_game_options,
+    IntentRegistry &)>;
 
 struct GamemodeInfo {
   std::string name;
   std::string blueboat_room_type;
   RoomFactory make_room;
+
+  std::function<Value(const Value &create_body)> resolve_intent_extras;
 };
 
 void register_gamemode(GamemodeInfo info);

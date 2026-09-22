@@ -178,6 +178,7 @@ int main(int argc, char **argv) {
     openkit::MatchmakerOptions matchmaker_options;
     matchmaker_options.public_url = public_url;
     matchmaker_options.default_questions = default_questions;
+    matchmaker_options.resolve_intent_extras = gamemode->resolve_intent_extras;
     if (tls_enabled) {
       matchmaker_options.tls = blueboat::TlsOptions{tls_cert_path, tls_key_path};
     }

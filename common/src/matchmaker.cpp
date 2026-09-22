@@ -148,10 +148,13 @@ void MatchmakerServer::handle_create(blueboat::Socket &sock,
 
   std::string code = registry_.reserve_code();
 
+  Value extras = options_.resolve_intent_extras ? options_.resolve_intent_extras(body) : Value::object();
+
   Value intent_data{
       {"gameOptions", game_options},
       {"questions", options_.default_questions},
       {"gameCode", code},
+      {"extras", extras},
   };
   std::string intent_id = registry_.register_intent(intent_data);
 

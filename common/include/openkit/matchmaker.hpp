@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,6 +21,8 @@ struct MatchmakerOptions {
   Value default_questions = Value::array();
 
   std::string game_source = "original";
+
+  std::function<Value(const Value &create_body)> resolve_intent_extras;
 
   std::optional<blueboat::TlsOptions> tls;
 };

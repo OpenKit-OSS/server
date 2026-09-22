@@ -103,6 +103,9 @@ private:
 
   std::string game_code_;
   std::string game_status_ = "gameplay";
+
+  double income_multiplier_ = 1.0;
+  double upgrade_pricing_discount_ = 1.0;
 };
 
 void register_tycoon_gamemode();

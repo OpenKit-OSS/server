@@ -48,6 +48,33 @@ Value fixed_game_options() {
                {"handicap", -50}};
 }
 
+struct TycoonVariant {
+  Value special_game_type = Value::array({"CLASSIC"});
+  double income_multiplier = 1.0;
+  double upgrade_pricing_discount = 1.0;
+};
+
+const std::unordered_map<std::string, TycoonVariant> &known_tycoon_variants() {
+  static const std::unordered_map<std::string, TycoonVariant> variants = {
+      {"618737355757c900231ff2d2",
+       TycoonVariant{Value::array({"RICH"}), 500.0, 500.0}},
+  };
+  return variants;
+}
+
+Value resolve_tycoon_intent_extras(const Value &create_body) {
+  std::string experience_id = create_body.value("experienceId", std::string());
+  const auto &variants = known_tycoon_variants();
+  auto it = variants.find(experience_id);
+  const TycoonVariant &variant =
+      it != variants.end() ? it->second : TycoonVariant{};
+  return Value{
+      {"specialGameType", variant.special_game_type},
+      {"incomeMultiplier", variant.income_multiplier},
+      {"upgradePricingDiscount", variant.upgrade_pricing_discount},
+  };
+}
+
 } // namespace
 
 void TycoonRoom::on_create(const Value &) {
@@ -57,10 +84,19 @@ void TycoonRoom::on_create(const Value &) {
                         : intent_registry_.resolve_intent(intent_id);
 
   if (intent_data) {
+    Value extras = intent_data->value("extras", Value::object());
+
     Value merged_options = fixed_game_options();
+    if (extras.contains("specialGameType")) {
+      merged_options["specialGameType"] = extras.at("specialGameType");
+    }
     merged_options.merge_patch(
         intent_data->value("gameOptions", Value::object()));
     this->options = merged_options;
+
+    income_multiplier_ = extras.value("incomeMultiplier", 1.0);
+    upgrade_pricing_discount_ = extras.value("upgradePricingDiscount", 1.0);
+
     for (const auto &q : intent_data->value("questions", Value::array())) {
       game_questions_.push_back(q);
     }
@@ -206,9 +242,9 @@ void TycoonRoom::send_full_player_state(blueboat::Client &client,
     upgrade_levels[k] = v;
   }
   send_state("UPGRADE_LEVELS", upgrade_levels);
-  send_state("UPGRADE_PRICING_DISCOUNT", 1);
+  send_state("UPGRADE_PRICING_DISCOUNT", upgrade_pricing_discount_);
   send_state("GAME_STATUS", game_status_);
-  send_state("INCOME_MULTIPLIER", 1);
+  send_state("INCOME_MULTIPLIER", income_multiplier_);
   send_state("LINK_INFO", Value{{"id", ""}, {"name", ""}});
   send_state("MAX_BALANCE", state.max_balance);
   send_state("DISABLED_POWERUPS", Value::array());
@@ -303,8 +339,9 @@ Value TycoonRoom::compute_balance_change(const PlayerState &state) const {
 
   long long if_correct =
       round_to_ll((money_per_question + state.streak * streak_bonus) *
-                  effective_multiplier);
-  long long if_incorrect = -round_to_ll(money_per_question * insurance);
+                  effective_multiplier * income_multiplier_);
+  long long if_incorrect =
+      -round_to_ll(money_per_question * insurance * income_multiplier_);
 
   return Value{{"balanceChangeIfCorrect", if_correct},
                {"balanceChangeIfIncorrect", if_incorrect}};
@@ -451,7 +488,9 @@ void TycoonRoom::handle_upgrade_purchased(blueboat::Client &client,
     return;
   }
 
-  long long price = upgrade_price(*upgrade_def, next_level);
+  long long price =
+      round_to_ll(static_cast<double>(upgrade_price(*upgrade_def, next_level)) *
+                  upgrade_pricing_discount_);
   if (state->discount_until &&
       std::chrono::steady_clock::now() < *state->discount_until) {
     price = round_to_ll(static_cast<double>(price) *
@@ -803,6 +842,7 @@ void register_tycoon_gamemode() {
             std::move(catalog), std::move(default_questions),
             std::move(default_game_options), intent_registry);
       },
+      resolve_tycoon_intent_extras,
   });
 }
 
