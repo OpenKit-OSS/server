@@ -485,13 +485,15 @@ void TycoonRoom::handle_upgrade_purchased(blueboat::Client &client,
   }
 
   int current_level = state->upgrade_levels[key_it->second];
-  if (next_level != current_level + 1) {
+  if (next_level <= current_level) {
     return;
   }
 
-  long long price =
-      round_to_ll(static_cast<double>(upgrade_price(*upgrade_def, next_level)) *
-                  upgrade_pricing_discount_);
+  long long price = 0;
+  for (int level = current_level + 1; level <= next_level; ++level) {
+    price += upgrade_price(*upgrade_def, level);
+  }
+  price = round_to_ll(static_cast<double>(price) * upgrade_pricing_discount_);
   if (state->discount_until &&
       std::chrono::steady_clock::now() < *state->discount_until) {
     price = round_to_ll(static_cast<double>(price) *
