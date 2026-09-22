@@ -8,6 +8,7 @@
 
 #include "blueboat/room.hpp"
 #include "openkit/catalog.hpp"
+#include "openkit/intent_registry.hpp"
 
 namespace openkit::tycoon {
 
@@ -52,9 +53,12 @@ struct PlayerState {
 
 class TycoonRoom : public blueboat::Room {
 public:
-  TycoonRoom(Catalog catalog, Value default_questions = Value::array())
+  TycoonRoom(Catalog catalog, Value default_questions,
+             Value default_game_options, IntentRegistry &intent_registry)
       : catalog_(std::move(catalog)),
-        default_questions_(std::move(default_questions)) {}
+        default_questions_(std::move(default_questions)),
+        default_game_options_(std::move(default_game_options)),
+        intent_registry_(intent_registry) {}
 
   void on_create(const Value &options) override;
   void on_join(blueboat::Client &client, const Value &options) override;
@@ -64,9 +68,11 @@ public:
 
 private:
   void send_static_state(blueboat::Client &client);
+  void send_host_static_state(blueboat::Client &client);
   void send_full_player_state(blueboat::Client &client,
                               const PlayerState &state);
   void broadcast_leaderboard();
+  Value filtered_powerups() const;
 
   void handle_question_answered(blueboat::Client &client, const Value &data);
   void handle_upgrade_purchased(blueboat::Client &client, const Value &data);
@@ -75,6 +81,7 @@ private:
   void handle_powerup_attack(blueboat::Client &client, const Value &data);
   void handle_theme_purchased(blueboat::Client &client, const Value &data);
   void handle_theme_applied(blueboat::Client &client, const Value &data);
+  void handle_new_game_status(blueboat::Client &client, const Value &data);
 
   bool is_frozen(const PlayerState &state) const;
   void send_activity_to_host(const std::string &name, const std::string &action,
@@ -85,12 +92,17 @@ private:
   void send_upgrade_levels(blueboat::Client &client, const PlayerState &state);
   void assign_next_question(blueboat::Client &client, PlayerState &state);
 
-  PlayerState *find_state(const std::string &session_id);
+  PlayerState *find_state(const std::string &client_id);
 
   Catalog catalog_;
   Value default_questions_;
+  Value default_game_options_;
+  IntentRegistry &intent_registry_;
   std::unordered_map<std::string, PlayerState> players_;
   std::vector<Value> game_questions_;
+
+  std::string game_code_;
+  std::string game_status_ = "gameplay";
 };
 
 void register_tycoon_gamemode();

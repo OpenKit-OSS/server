@@ -1,24 +1,25 @@
 {
-  "gameOptions": {
-    "type": "live",
-    "specialGameType": [
-      "CLASSIC"
-    ],
-    "goal": {
-      "type": "allIn",
-      "value": 5000000
-    },
-    "currency": "$",
-    "language": "en",
-    "startingCash": 0,
-    "handicap": -50,
-    "clapping": false,
-    "cleanPowerupsOnly": false,
-    "music": false,
-    "allowGoogleTranslate": false,
-    "modeOptions": {}
-  },
   "powerups": [
+    {
+      "name": "backToSchoolBeat",
+      "displayName": "Back To School Beat",
+      "description": "Get the new school year started right.",
+      "icon": "fas fa-music",
+      "color": {
+        "background": "#b71c1c",
+        "text": "white"
+      },
+      "category": [
+        "specialSound"
+      ],
+      "baseCost": 50,
+      "percentageCost": 0.3,
+      "disabled": [
+        "musicOff"
+      ],
+      "customTag": "",
+      "autoActivate": false
+    },
     {
       "name": "Icer",
       "displayName": "Freezer",
@@ -48,6 +49,26 @@
       "disabled": [
         "cleanOnly"
       ]
+    },
+    {
+      "name": "dreamweaver",
+      "displayName": "Dreamweaver",
+      "description": "Take it easy with this catchy tune.",
+      "icon": "fas fa-music",
+      "color": {
+        "background": "#00796b",
+        "text": "white"
+      },
+      "category": [
+        "specialSound"
+      ],
+      "baseCost": 50,
+      "percentageCost": 0.3,
+      "disabled": [
+        "musicOff"
+      ],
+      "customTag": "",
+      "autoActivate": false
     },
     {
       "name": "repurchasePowerups",

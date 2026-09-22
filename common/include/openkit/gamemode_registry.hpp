@@ -7,11 +7,12 @@
 
 #include "blueboat/room.hpp"
 #include "openkit/catalog.hpp"
+#include "openkit/intent_registry.hpp"
 
 namespace openkit {
 
 using RoomFactory = std::function<std::unique_ptr<blueboat::Room>(
-    Catalog, Value default_questions)>;
+    Catalog, Value default_questions, Value default_game_options, IntentRegistry &)>;
 
 struct GamemodeInfo {
   std::string name;

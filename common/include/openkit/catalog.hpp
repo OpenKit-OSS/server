@@ -13,7 +13,6 @@ class Catalog {
 public:
   static Catalog load(const std::string &gamemode_name);
 
-  const Value &game_options_defaults() const { return data_.at("gameOptions"); }
   const Value &powerups() const { return data_.at("powerups"); }
   const Value &upgrades() const { return data_.at("upgrades"); }
   const Value &themes() const { return data_.at("themes"); }

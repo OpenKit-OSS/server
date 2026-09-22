@@ -42,14 +42,39 @@ const std::unordered_map<std::string, std::string> &upgrade_display_to_key() {
   return map;
 }
 
+Value fixed_game_options() {
+  return Value{{"type", "live"},
+               {"specialGameType", Value::array({"CLASSIC"})},
+               {"handicap", -50}};
+}
+
 } // namespace
 
 void TycoonRoom::on_create(const Value &) {
-  Value merged_options = catalog_.game_options_defaults();
-  if (creator_options.contains("gameOptions") &&
-      creator_options.at("gameOptions").is_object()) {
-    merged_options.merge_patch(creator_options.at("gameOptions"));
+  std::string intent_id = creator_options.value("intentId", std::string());
+  std::optional<Value> intent_data =
+      intent_id.empty() ? std::nullopt
+                        : intent_registry_.resolve_intent(intent_id);
+
+  if (intent_data) {
+    Value merged_options = fixed_game_options();
+    merged_options.merge_patch(
+        intent_data->value("gameOptions", Value::object()));
+    this->options = merged_options;
+    for (const auto &q : intent_data->value("questions", Value::array())) {
+      game_questions_.push_back(q);
+    }
+    game_code_ = intent_data->value("gameCode", std::string());
+    game_status_ = "join";
+    intent_registry_.link_code_to_room(game_code_, room_id);
+    return;
   }
+
+  Value merged_options = fixed_game_options();
+  merged_options.merge_patch((creator_options.contains("gameOptions") &&
+                              creator_options.at("gameOptions").is_object())
+                                 ? creator_options.at("gameOptions")
+                                 : default_game_options_);
   this->options = merged_options;
 
   if (creator_options.contains("questions") &&
@@ -62,23 +87,63 @@ void TycoonRoom::on_create(const Value &) {
       game_questions_.push_back(q);
     }
   }
+
+  if (creator_options.contains("gameCode")) {
+    game_code_ = creator_options.value("gameCode", std::string());
+    game_status_ = "join";
+  }
 }
 
-PlayerState *TycoonRoom::find_state(const std::string &session_id) {
-  auto it = players_.find(session_id);
+PlayerState *TycoonRoom::find_state(const std::string &client_id) {
+  auto it = players_.find(client_id);
   return it == players_.end() ? nullptr : &it->second;
+}
+
+Value TycoonRoom::filtered_powerups() const {
+  bool music_on = options.value("music", false);
+  bool clean_only = options.value("cleanPowerupsOnly", false);
+
+  Value result = Value::array();
+  for (const auto &powerup : catalog_.powerups()) {
+    bool hide_for_music_off = false;
+    bool hide_for_clean_only = false;
+    for (const auto &tag : powerup.value("disabled", Value::array())) {
+      if (tag == "musicOff") {
+        hide_for_music_off = true;
+      } else if (tag == "cleanOnly") {
+        hide_for_clean_only = true;
+      }
+    }
+    if (hide_for_music_off && !music_on) {
+      continue;
+    }
+    if (hide_for_clean_only && clean_only) {
+      continue;
+    }
+    result.push_back(powerup);
+  }
+  return result;
 }
 
 void TycoonRoom::send_static_state(blueboat::Client &client) {
   client.send("PLAYER_JOINS_STATIC_STATE",
               Value{
                   {"gameOptions", options},
-                  {"powerups", catalog_.powerups()},
+                  {"powerups", filtered_powerups()},
                   {"upgrades", catalog_.upgrades()},
                   {"themes", catalog_.themes()},
                   {"disabledThemes", catalog_.disabled_themes()},
                   {"news", catalog_.news()},
               });
+}
+
+void TycoonRoom::send_host_static_state(blueboat::Client &client) {
+  client.send("HOST_STATIC_STATE", Value{
+                                       {"options", options},
+                                       {"powerups", filtered_powerups()},
+                                       {"themes", catalog_.themes()},
+                                       {"gameCode", ""},
+                                   });
 }
 
 void TycoonRoom::assign_next_question(blueboat::Client &client,
@@ -142,7 +207,7 @@ void TycoonRoom::send_full_player_state(blueboat::Client &client,
   }
   send_state("UPGRADE_LEVELS", upgrade_levels);
   send_state("UPGRADE_PRICING_DISCOUNT", 1);
-  send_state("GAME_STATUS", "gameplay");
+  send_state("GAME_STATUS", game_status_);
   send_state("INCOME_MULTIPLIER", 1);
   send_state("LINK_INFO", Value{{"id", ""}, {"name", ""}});
   send_state("MAX_BALANCE", state.max_balance);
@@ -163,13 +228,22 @@ void TycoonRoom::send_full_player_state(blueboat::Client &client,
 }
 
 void TycoonRoom::on_join(blueboat::Client &client, const Value &join_options) {
-  PlayerState state;
-  state.question_bank = game_questions_;
+  if (!game_code_.empty() && owner.id.empty()) {
+    owner.id = client.id;
+    owner.session_id = client.session_id;
+  }
 
-  auto [it, inserted] = players_.emplace(client.session_id, std::move(state));
+  bool is_host = !owner.id.empty() && client.id == owner.id;
+  if (is_host) {
+    send_host_static_state(client);
+    return;
+  }
+
+  auto [it, inserted] = players_.try_emplace(client.id);
   PlayerState &player = it->second;
 
-  if (!player.question_bank.empty()) {
+  if (inserted) {
+    player.question_bank = game_questions_;
     for (const auto &q : player.question_bank) {
       player.question_list.push_back(q.value("_id", std::string()));
     }
@@ -178,12 +252,24 @@ void TycoonRoom::on_join(blueboat::Client &client, const Value &join_options) {
   send_static_state(client);
   send_full_player_state(client, player);
 
+  std::string resolved_name;
   if (join_options.contains("name") && join_options.at("name").is_string()) {
-    player.name = join_options.at("name").get<std::string>();
+    resolved_name = join_options.at("name").get<std::string>();
+  } else if (join_options.contains("intent") &&
+             join_options.at("intent").is_string()) {
+    auto intent_data = intent_registry_.resolve_intent(
+        join_options.at("intent").get<std::string>());
+    if (intent_data) {
+      resolved_name = intent_data->value("name", std::string());
+    }
+  }
+
+  if (!resolved_name.empty()) {
+    player.name = resolved_name;
     client.send("STATE_UPDATE",
                 Value{{"type", "NAME"}, {"value", player.name}});
     client.send("STATE_UPDATE",
-                Value{{"type", "GAME_STATUS"}, {"value", "gameplay"}});
+                Value{{"type", "GAME_STATUS"}, {"value", game_status_}});
     client.send("STATE_UPDATE", Value{{"type", "DISABLED_POWERUPS"},
                                       {"value", Value::array()}});
   }
@@ -192,7 +278,7 @@ void TycoonRoom::on_join(blueboat::Client &client, const Value &join_options) {
 }
 
 void TycoonRoom::on_leave(blueboat::Client &client, bool) {
-  players_.erase(client.session_id);
+  allow_reconnection(client, 30);
 }
 
 Value TycoonRoom::compute_balance_change(const PlayerState &state) const {
@@ -248,12 +334,33 @@ void TycoonRoom::on_message(blueboat::Client &client, const std::string &key,
     handle_theme_applied(client, data);
   } else if (key == "PLAYER_LEADERBOARD_REQUESTED") {
     broadcast_leaderboard();
+  } else if (key == "NEW_GAME_STATUS") {
+    handle_new_game_status(client, data);
   }
+}
+
+void TycoonRoom::handle_new_game_status(blueboat::Client &client,
+                                        const Value &data) {
+  if (owner.id.empty() || client.id != owner.id) {
+    return;
+  }
+  std::string status =
+      data.is_string() ? data.get<std::string>() : std::string();
+  if (status.empty()) {
+    return;
+  }
+  game_status_ = status;
+
+  if (status == "join") {
+    client.send("VIEWABLE_GAME_CODE", game_code_);
+  }
+  broadcast("STATE_UPDATE",
+            Value{{"type", "GAME_STATUS"}, {"value", game_status_}});
 }
 
 void TycoonRoom::handle_question_answered(blueboat::Client &client,
                                           const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -317,7 +424,7 @@ void TycoonRoom::handle_question_answered(blueboat::Client &client,
 
 void TycoonRoom::handle_upgrade_purchased(blueboat::Client &client,
                                           const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -383,7 +490,7 @@ void TycoonRoom::send_upgrade_levels(blueboat::Client &client,
 
 void TycoonRoom::handle_powerup_purchased(blueboat::Client &client,
                                           const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -393,7 +500,7 @@ void TycoonRoom::handle_powerup_purchased(blueboat::Client &client,
 
   std::string powerup_name =
       data.is_string() ? data.get<std::string>() : std::string();
-  auto powerup_def = catalog_.find_by_name(catalog_.powerups(), powerup_name);
+  auto powerup_def = catalog_.find_by_name(filtered_powerups(), powerup_name);
   if (!powerup_def) {
     return;
   }
@@ -430,7 +537,7 @@ bool is_targeted_powerup(const std::string &name) {
 
 void TycoonRoom::handle_powerup_activated(blueboat::Client &client,
                                           const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -502,7 +609,7 @@ void TycoonRoom::handle_powerup_activated(blueboat::Client &client,
 
 void TycoonRoom::handle_powerup_attack(blueboat::Client &client,
                                        const Value &data) {
-  PlayerState *attacker_state = find_state(client.session_id);
+  PlayerState *attacker_state = find_state(client.id);
   if (!attacker_state) {
     return;
   }
@@ -527,7 +634,7 @@ void TycoonRoom::handle_powerup_attack(blueboat::Client &client,
   if (!target_client) {
     return;
   }
-  PlayerState *target_state = find_state(target_client->session_id);
+  PlayerState *target_state = find_state(target_client->id);
   if (!target_state) {
     return;
   }
@@ -613,7 +720,7 @@ void TycoonRoom::send_activity_to_host(const std::string &name,
 
 void TycoonRoom::handle_theme_purchased(blueboat::Client &client,
                                         const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -648,7 +755,7 @@ void TycoonRoom::handle_theme_purchased(blueboat::Client &client,
 
 void TycoonRoom::handle_theme_applied(blueboat::Client &client,
                                       const Value &data) {
-  PlayerState *state = find_state(client.session_id);
+  PlayerState *state = find_state(client.id);
   if (!state) {
     return;
   }
@@ -671,7 +778,7 @@ void TycoonRoom::handle_theme_applied(blueboat::Client &client,
 void TycoonRoom::broadcast_leaderboard() {
   Value items = Value::array();
   for (const auto &client_ptr : clients()) {
-    const PlayerState *state = find_state(client_ptr->session_id);
+    const PlayerState *state = find_state(client_ptr->id);
     if (!state) {
       continue;
     }
@@ -689,11 +796,12 @@ void TycoonRoom::broadcast_leaderboard() {
 void register_tycoon_gamemode() {
   register_gamemode(GamemodeInfo{
       "tycoon",
-      "Tycoon",
-      [](Catalog catalog,
-         Value default_questions) -> std::unique_ptr<blueboat::Room> {
-        return std::make_unique<TycoonRoom>(std::move(catalog),
-                                            std::move(default_questions));
+      "LiveGame",
+      [](Catalog catalog, Value default_questions, Value default_game_options,
+         IntentRegistry &intent_registry) -> std::unique_ptr<blueboat::Room> {
+        return std::make_unique<TycoonRoom>(
+            std::move(catalog), std::move(default_questions),
+            std::move(default_game_options), intent_registry);
       },
   });
 }
