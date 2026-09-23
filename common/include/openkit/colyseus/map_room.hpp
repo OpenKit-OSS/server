@@ -27,6 +27,8 @@ private:
   void handle_request_initial_world(Client &client);
   void handle_input(Client &client, const Value &data);
   void handle_start_game(Client &client, const Value &data);
+  void handle_set_active_interactive_item(Client &client, const Value &data);
+  void handle_aiming(Client &client, const Value &data);
   void assign_teams(const std::string &owner_id, bool owner_as_spectator,
                     const Value &custom_teams);
   void apply_spawn_positions();

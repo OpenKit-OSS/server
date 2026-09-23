@@ -124,6 +124,7 @@ enum ZoneField {
   kZone_AllowResourceDrop = 3
 };
 enum PhysicsField { kPhysics_IsGrounded = 0, kPhysics_IsWallSliding = 1 };
+enum ProjectilesField { kProj_AimAngle = 0, kProj_DamageMultiplier = 1 };
 enum AppearanceField {
   kAppearance_Skin = 0,
   kAppearance_TrailId = 1,
@@ -356,6 +357,10 @@ void MapRoom::on_message(Client &client, const std::string &type,
     handle_input(client, data);
   } else if (type == "START_GAME") {
     handle_start_game(client, data);
+  } else if (type == "SET_ACTIVE_INTERACTIVE_ITEM") {
+    handle_set_active_interactive_item(client, data);
+  } else if (type == "AIMING") {
+    handle_aiming(client, data);
   }
 }
 
@@ -391,6 +396,37 @@ void MapRoom::handle_input(Client &client, const Value &data) {
   client.send(
       "PHYSICS_STATE",
       Value{{"x", x}, {"y", y}, {"physicsState", physics_state.dump()}});
+}
+
+void MapRoom::handle_set_active_interactive_item(Client &client,
+                                                 const Value &data) {
+  auto character = state().map_child(kRoot_Characters)->find(client.id());
+  if (!character)
+    return;
+
+  int slot_num = static_cast<int>(data.value("slotNum", 0.0));
+  auto inventory = character->ref_child(kChar_Inventory);
+  inventory->set_number(kInv_ActiveInteractiveSlot, slot_num);
+
+  constexpr double kWeaponSwitchDelayMs = 1800;
+  auto slot = inventory->map_child(kInv_InteractiveSlots)
+                  ->find(std::to_string(slot_num));
+  if (slot) {
+    double now = now_ms();
+    slot->set_number(kSlot_WaitingStartTime, now);
+    slot->set_number(kSlot_WaitingEndTime, now + kWeaponSwitchDelayMs);
+  }
+
+  broadcast_state_patch();
+}
+
+void MapRoom::handle_aiming(Client &client, const Value &data) {
+  auto character = state().map_child(kRoot_Characters)->find(client.id());
+  if (!character)
+    return;
+  character->ref_child(kChar_Projectiles)
+      ->set_number(kProj_AimAngle, data.value("angle", 0.0));
+  broadcast_state_patch();
 }
 
 void MapRoom::assign_teams(const std::string &owner_id, bool owner_as_spectator,
