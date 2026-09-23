@@ -29,6 +29,9 @@ private:
   void handle_start_game(Client &client, const Value &data);
   void handle_set_active_interactive_item(Client &client, const Value &data);
   void handle_aiming(Client &client, const Value &data);
+  void handle_add_game_time(Client &client, const Value &data);
+  void handle_end_game(Client &client, const Value &data);
+  void handle_kick_player(Client &client, const Value &data);
   void assign_teams(const std::string &owner_id, bool owner_as_spectator,
                     const Value &custom_teams);
   void apply_spawn_positions();
@@ -42,6 +45,7 @@ private:
   MapCatalog map_catalog_;
   Value game_options_ = Value::object();
   Value game_settings_ = Value::object();
+  double countdown_end_ = 0;
 };
 
 } // namespace openkit::colyseus

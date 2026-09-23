@@ -361,6 +361,12 @@ void MapRoom::on_message(Client &client, const std::string &type,
     handle_set_active_interactive_item(client, data);
   } else if (type == "AIMING") {
     handle_aiming(client, data);
+  } else if (type == "ADD_GAME_TIME") {
+    handle_add_game_time(client, data);
+  } else if (type == "END_GAME") {
+    handle_end_game(client, data);
+  } else if (type == "KICK_PLAYER") {
+    handle_kick_player(client, data);
   }
 }
 
@@ -501,6 +507,7 @@ void MapRoom::handle_start_game(Client &client, const Value &data) {
   game_session->set_number(kGameSession_ResultsEnd, 0);
 
   double countdown_end = has_countdown ? now + countdown_minutes * 60000.0 : 0;
+  countdown_end_ = countdown_end;
   session->set_string(kSession_Phase, "game");
   game_session->set_string(kGameSession_Phase, "game");
 
@@ -632,6 +639,94 @@ void MapRoom::apply_game_start_devices(double countdown_end) {
   }
 
   broadcast("DEVICES_STATES_CHANGES", DeviceStateCompiler::encode(changes));
+}
+
+namespace {
+std::string find_map_options_device_id(const Value &devices) {
+  for (const Value &device : devices) {
+    if (device.value("type", std::string()) == "mapOptions")
+      return device.value("id", std::string());
+  }
+  return std::string();
+}
+} // namespace
+
+void MapRoom::handle_add_game_time(Client &client, const Value & /*data*/) {
+  auto session = state().ref_child(kRoot_Session);
+  if (client.id() != session->get_string(kSession_GameOwnerId))
+    return;
+
+  std::string map_options_id =
+      find_map_options_device_id(map_catalog_.devices());
+  if (map_options_id.empty())
+    return;
+
+  countdown_end_ += 60000;
+
+  Value entry_props = Value::object();
+  entry_props["GLOBAL_countdownEndTimestamp"] = countdown_end_;
+  Value changes = Value::array();
+  changes.push_back(Value{{"id", map_options_id}, {"properties", entry_props}});
+  broadcast("DEVICES_STATES_CHANGES", DeviceStateCompiler::encode(changes));
+}
+
+void MapRoom::handle_end_game(Client &client, const Value & /*data*/) {
+  auto session = state().ref_child(kRoot_Session);
+  if (client.id() != session->get_string(kSession_GameOwnerId))
+    return;
+
+  double now = now_ms();
+  auto game_session = session->ref_child(kSession_GameSession);
+  session->set_string(kSession_Phase, "results");
+  session->set_number(kSession_PhaseChangedAt, now);
+  game_session->set_string(kGameSession_Phase, "results");
+  broadcast_state_patch();
+
+  Value changes = Value::array();
+  std::string map_options_id =
+      find_map_options_device_id(map_catalog_.devices());
+  if (!map_options_id.empty()) {
+    Value map_options_props = Value::object();
+    map_options_props["GLOBAL_gameMusicState"] = "fadingOut";
+    map_options_props["GLOBAL_countdownActive"] = false;
+    changes.push_back(
+        Value{{"id", map_options_id}, {"properties", map_options_props}});
+  }
+
+  auto characters = state().map_child(kRoot_Characters);
+  for (const Value &device : map_catalog_.devices()) {
+    if (device.value("type", std::string()) != "endOfGameWidget")
+      continue;
+    std::string device_id = device.value("id", std::string());
+    for (const auto &entry : characters->entries()) {
+      if (!entry.alive)
+        continue;
+      Value props = Value::object();
+      props["PLAYER_" + entry.key + "_active"] = true;
+      props["PLAYER_" + entry.key + "_value"] =
+          entry.value->get_number(kChar_Score);
+      changes.push_back(Value{{"id", device_id}, {"properties", props}});
+    }
+  }
+
+  broadcast("DEVICES_STATES_CHANGES", DeviceStateCompiler::encode(changes));
+}
+
+void MapRoom::handle_kick_player(Client &client, const Value &data) {
+  auto session = state().ref_child(kRoot_Session);
+  if (client.id() != session->get_string(kSession_GameOwnerId))
+    return;
+
+  std::string character_id = data.value("characterId", std::string());
+  if (character_id.empty() || character_id == client.id())
+    return;
+
+  Client *target = find_client_by_id(character_id);
+  if (!target)
+    return;
+
+  target->send("GOT_KICKED");
+  target->close();
 }
 
 } // namespace openkit::colyseus

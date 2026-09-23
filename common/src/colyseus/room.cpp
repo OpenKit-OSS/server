@@ -80,6 +80,15 @@ void Room::remove_client(const std::string &session_id, bool intentional) {
   }
 }
 
+Client *Room::find_client_by_id(const std::string &id) const {
+  std::lock_guard<std::recursive_mutex> guard(mutex_);
+  for (const auto &client : clients_) {
+    if (client->id() == id)
+      return client.get();
+  }
+  return nullptr;
+}
+
 void Room::dispatch_message(const std::string &session_id,
                             const std::string &type, const Value &data) {
   std::lock_guard<std::recursive_mutex> guard(mutex_);

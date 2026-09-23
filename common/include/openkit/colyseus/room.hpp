@@ -76,6 +76,8 @@ protected:
 
   std::recursive_mutex &mutex() { return mutex_; }
 
+  Client *find_client_by_id(const std::string &id) const;
+
 private:
   mutable std::recursive_mutex mutex_;
   std::vector<std::unique_ptr<Client>> clients_;
