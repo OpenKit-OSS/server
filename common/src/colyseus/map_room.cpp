@@ -124,9 +124,25 @@ enum ZoneField {
   kZone_AllowResourceDrop = 3
 };
 enum PhysicsField { kPhysics_IsGrounded = 0, kPhysics_IsWallSliding = 1 };
-enum AppearanceField { kAppearance_Skin = 0 };
+enum AppearanceField {
+  kAppearance_Skin = 0,
+  kAppearance_TrailId = 1,
+  kAppearance_TransparencyModifierId = 2,
+  kAppearance_TintModifierId = 3
+};
+enum ClassDesignerField {
+  kClassDesigner_LastActivatedClassDeviceId = 0,
+  kClassDesigner_LastClassDeviceActivationId = 1
+};
+enum InventorySlotField { kInvSlot_Amount = 0 };
 enum MatchmakerField { kMatchmaker_GameCode = 0 };
 enum HooksField { kHooks_HookJSON = 0 };
+
+int default_clip_size(const std::string &item_id) {
+  if (item_id.rfind("snowball_launcher_", 0) == 0)
+    return 16;
+  return 0;
+}
 
 constexpr int kRootClass = 0;
 
@@ -256,9 +272,14 @@ void MapRoom::on_join(Client &client, const Value &options) {
   character->set_bool(kChar_CompletedInitialPlacement, true);
   character->set_bool(kChar_IsRespawning, false);
   character->set_number(kChar_Score, 0);
-  character->ref_child(kChar_ClassDesigner);
-  character->ref_child(kChar_Appearance)
-      ->set_string(kAppearance_Skin, R"({"id":"character_truffle"})");
+  auto class_designer = character->ref_child(kChar_ClassDesigner);
+  class_designer->set_string(kClassDesigner_LastActivatedClassDeviceId, "");
+  class_designer->set_number(kClassDesigner_LastClassDeviceActivationId, 1);
+  auto appearance = character->ref_child(kChar_Appearance);
+  appearance->set_string(kAppearance_Skin, R"({"id":"character_truffle"})");
+  appearance->set_string(kAppearance_TrailId, "");
+  appearance->set_string(kAppearance_TransparencyModifierId, "");
+  appearance->set_string(kAppearance_TintModifierId, "");
   auto permissions = character->ref_child(kChar_Permissions);
   permissions->set_bool(kPerms_Adding, false);
   permissions->set_bool(kPerms_Removing, false);
@@ -268,10 +289,11 @@ void MapRoom::on_join(Client &client, const Value &options) {
   inventory->map_child(kInv_Slots);
   inventory->set_number(kInv_MaxSlots, 999);
   inventory->set_number(kInv_ActiveInteractiveSlot, 0);
+  constexpr int kInteractiveSlotCount = 5;
   auto interactive_slots = inventory->map_child(kInv_InteractiveSlots);
-  int interactive_slot_count =
-      static_cast<int>(game_settings_.value("interactiveItemsSlots", 4.0));
-  for (int i = 1; i <= interactive_slot_count; i++) {
+  auto interactive_slots_order =
+      inventory->array_child(kInv_InteractiveSlotsOrder);
+  for (int i = 1; i <= kInteractiveSlotCount; i++) {
     auto slot = interactive_slots->get_or_create(std::to_string(i));
     slot->set_string(kSlot_ItemId, "");
     slot->set_bool(kSlot_Waiting, false);
@@ -281,8 +303,8 @@ void MapRoom::on_join(Client &client, const Value &options) {
     slot->set_number(kSlot_ClipSize, 0);
     slot->set_number(kSlot_Durability, -1);
     slot->set_number(kSlot_Count, 0);
+    interactive_slots_order->push_primitive(Value(i));
   }
-  inventory->array_child(kInv_InteractiveSlotsOrder);
   inventory->set_bool(kInv_InfiniteAmmo, false);
   character->ref_child(kChar_Xp);
   character->ref_child(kChar_Assignment);
@@ -296,11 +318,13 @@ void MapRoom::on_join(Client &client, const Value &options) {
   health->set_number(kHealth_MaxHealth,
                      game_settings_.value("maxHealth", 100.0));
   health->set_number(kHealth_MaxShield, game_settings_.value("maxShield", 0.0));
-  health->set_number(kHealth_Lives, game_settings_.value("numOfLives", 3.0));
+  health->set_number(kHealth_Lives,
+                     game_settings_.value("useInfiniteLives", false)
+                         ? -1.0
+                         : game_settings_.value("numOfLives", 3.0));
   health->set_bool(kHealth_SpawnImmunityActive, false);
   health->set_bool(kHealth_ClassImmunityActive, false);
-  health->set_bool(kHealth_ShowHealthBar,
-                   game_settings_.value("showHealthAndShield", true));
+  health->set_bool(kHealth_ShowHealthBar, false);
   character->ref_child(kChar_Projectiles);
   auto zone = character->ref_child(kChar_ZoneAbilitiesOverrides);
   zone->set_bool(kZone_AllowWeaponFire, true);
@@ -456,13 +480,12 @@ void MapRoom::handle_start_game(Client &client, const Value &data) {
 
 void MapRoom::grant_starting_inventory(
     std::shared_ptr<schema::Node> character) {
+  constexpr int kInteractiveSlotCount = 5;
   std::string phase =
       state().ref_child(kRoot_Session)->get_string(kSession_Phase);
   auto inventory = character->ref_child(kChar_Inventory);
+  auto slots = inventory->map_child(kInv_Slots);
   auto interactive_slots = inventory->map_child(kInv_InteractiveSlots);
-  auto slots_order = inventory->array_child(kInv_InteractiveSlotsOrder);
-  int slot_count =
-      static_cast<int>(game_settings_.value("interactiveItemsSlots", 4.0));
 
   for (const Value &device : map_catalog_.devices()) {
     if (device.value("type", std::string()) != "startingInventory")
@@ -478,16 +501,17 @@ void MapRoom::grant_starting_inventory(
       continue;
     double amount = props.value("itemAmount", 1.0);
 
-    for (int i = 1; i <= slot_count; i++) {
-      std::string key = std::to_string(i);
-      auto slot = interactive_slots->find(key);
-      if (slot && !slot->get_string(kSlot_ItemId).empty())
+    slots->get_or_create(item_id)->set_number(kInvSlot_Amount, amount);
+
+    for (int i = 1; i <= kInteractiveSlotCount; i++) {
+      auto slot = interactive_slots->find(std::to_string(i));
+      if (!slot || !slot->get_string(kSlot_ItemId).empty())
         continue;
-      if (!slot)
-        slot = interactive_slots->get_or_create(key);
+      int clip_size = default_clip_size(item_id);
       slot->set_string(kSlot_ItemId, item_id);
       slot->set_number(kSlot_Count, amount);
-      slots_order->push_primitive(key);
+      slot->set_number(kSlot_CurrentClip, clip_size);
+      slot->set_number(kSlot_ClipSize, clip_size);
       if (props.value("equipOnGrant", false))
         inventory->set_number(kInv_ActiveInteractiveSlot, i);
       break;
