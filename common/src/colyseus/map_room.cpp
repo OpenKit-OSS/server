@@ -1,8 +1,12 @@
 #include "openkit/colyseus/map_room.hpp"
 
 #include <chrono>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "openkit/colyseus/auth_token.hpp"
+#include "openkit/colyseus/device_state_compiler.hpp"
 
 namespace openkit::colyseus {
 
@@ -229,10 +233,7 @@ void MapRoom::schedule_tick() {
       });
 }
 
-void MapRoom::on_dispose() {
-  tick_timer_.clear();
-  phase_timer_.clear();
-}
+void MapRoom::on_dispose() { tick_timer_.clear(); }
 
 void MapRoom::on_join(Client &client, const Value &options) {
   auto characters = state().map_child(kRoot_Characters);
@@ -268,7 +269,9 @@ void MapRoom::on_join(Client &client, const Value &options) {
   inventory->set_number(kInv_MaxSlots, 999);
   inventory->set_number(kInv_ActiveInteractiveSlot, 0);
   auto interactive_slots = inventory->map_child(kInv_InteractiveSlots);
-  for (int i = 1; i <= 4; i++) {
+  int interactive_slot_count =
+      static_cast<int>(game_settings_.value("interactiveItemsSlots", 4.0));
+  for (int i = 1; i <= interactive_slot_count; i++) {
     auto slot = interactive_slots->get_or_create(std::to_string(i));
     slot->set_string(kSlot_ItemId, "");
     slot->set_bool(kSlot_Waiting, false);
@@ -284,15 +287,20 @@ void MapRoom::on_join(Client &client, const Value &options) {
   character->ref_child(kChar_Xp);
   character->ref_child(kChar_Assignment);
   auto health = character->ref_child(kChar_Health);
-  health->set_number(kHealth_Fragility, 0);
-  health->set_number(kHealth_Health, 100);
-  health->set_number(kHealth_Shield, 100);
-  health->set_number(kHealth_MaxHealth, 100);
-  health->set_number(kHealth_MaxShield, 100);
-  health->set_number(kHealth_Lives, 3);
+  health->set_number(kHealth_Fragility,
+                     game_settings_.value("startingFragility", 0.0));
+  health->set_number(kHealth_Health,
+                     game_settings_.value("startingHealth", 100.0));
+  health->set_number(kHealth_Shield,
+                     game_settings_.value("startingShield", 0.0));
+  health->set_number(kHealth_MaxHealth,
+                     game_settings_.value("maxHealth", 100.0));
+  health->set_number(kHealth_MaxShield, game_settings_.value("maxShield", 0.0));
+  health->set_number(kHealth_Lives, game_settings_.value("numOfLives", 3.0));
   health->set_bool(kHealth_SpawnImmunityActive, false);
   health->set_bool(kHealth_ClassImmunityActive, false);
-  health->set_bool(kHealth_ShowHealthBar, true);
+  health->set_bool(kHealth_ShowHealthBar,
+                   game_settings_.value("showHealthAndShield", true));
   character->ref_child(kChar_Projectiles);
   auto zone = character->ref_child(kChar_ZoneAbilitiesOverrides);
   zone->set_bool(kZone_AllowWeaponFire, true);
@@ -302,6 +310,8 @@ void MapRoom::on_join(Client &client, const Value &options) {
   auto physics = character->ref_child(kChar_Physics);
   physics->set_bool(kPhysics_IsGrounded, false);
   physics->set_bool(kPhysics_IsWallSliding, false);
+
+  grant_starting_inventory(character);
 
   broadcast_state_patch();
 
@@ -359,10 +369,10 @@ void MapRoom::handle_input(Client &client, const Value &data) {
       Value{{"x", x}, {"y", y}, {"physicsState", physics_state.dump()}});
 }
 
-void MapRoom::assign_teams(const std::string &owner_id,
-                           bool owner_as_spectator,
+void MapRoom::assign_teams(const std::string &owner_id, bool owner_as_spectator,
                            const Value &custom_teams) {
-  std::string team_mode = game_settings_.value("teams", std::string("Free For All"));
+  std::string team_mode =
+      game_settings_.value("teams", std::string("Free For All"));
   if (team_mode == "Free For All")
     return;
 
@@ -384,7 +394,8 @@ void MapRoom::assign_teams(const std::string &owner_id,
       continue;
 
     std::string team_id;
-    if (custom_teams.contains(char_id) && custom_teams.at(char_id).is_string()) {
+    if (custom_teams.contains(char_id) &&
+        custom_teams.at(char_id).is_string()) {
       team_id = custom_teams.at(char_id).get<std::string>();
     } else {
       team_id = std::to_string((next_team % teams_number) + 1);
@@ -401,7 +412,9 @@ void MapRoom::assign_teams(const std::string &owner_id,
       continue;
 
     entry.value->set_string(kChar_TeamId, team_id);
-    teams->entries()[idx - 1].ref->array_child(kTeam_Characters)->push_primitive(char_id);
+    teams->entries()[idx - 1]
+        .ref->array_child(kTeam_Characters)
+        ->push_primitive(char_id);
   }
 }
 
@@ -415,8 +428,10 @@ void MapRoom::handle_start_game(Client &client, const Value &data) {
   bool owner_as_spectator = data.value("ownerAsSpectator", false);
   Value custom_teams = data.value("customTeams", Value::object());
   assign_teams(client.id(), owner_as_spectator, custom_teams);
+  apply_spawn_positions();
 
-  std::string clock_mode = game_settings_.value("gameClockMode", std::string("Off"));
+  std::string clock_mode =
+      game_settings_.value("gameClockMode", std::string("Off"));
   double countdown_minutes = game_settings_.value("countdownTimeMinutes", 0.0);
   bool has_countdown = clock_mode == "Count Down" && countdown_minutes > 0;
 
@@ -425,35 +440,138 @@ void MapRoom::handle_start_game(Client &client, const Value &data) {
   session->set_number(kSession_PhaseChangedAt, now);
   game_session->set_number(kGameSession_ResultsEnd, 0);
 
-  if (has_countdown) {
-    double countdown_end = now + countdown_minutes * 60000.0;
-    session->set_string(kSession_Phase, "countdown");
-    game_session->set_string(kGameSession_Phase, "countdown");
-    game_session->set_number(kGameSession_CountdownEnd, countdown_end);
-    schedule_phase_change("live", countdown_end - now);
-  } else {
-    session->set_string(kSession_Phase, "live");
-    game_session->set_string(kGameSession_Phase, "live");
-    game_session->set_number(kGameSession_CountdownEnd, 0);
+  double countdown_end = has_countdown ? now + countdown_minutes * 60000.0 : 0;
+  session->set_string(kSession_Phase, "game");
+  game_session->set_string(kGameSession_Phase, "game");
+
+  auto characters = state().map_child(kRoot_Characters);
+  for (const auto &entry : characters->entries()) {
+    if (entry.alive)
+      grant_starting_inventory(entry.value);
   }
 
+  apply_game_start_devices(countdown_end);
   broadcast_state_patch();
 }
 
-void MapRoom::schedule_phase_change(const std::string &new_phase, double delay_ms) {
-  if (delay_ms < 0)
-    delay_ms = 0;
-  phase_timer_ = blueboat::Scheduler::instance().set_timeout(
-      std::chrono::milliseconds(static_cast<long long>(delay_ms)),
-      [this, new_phase] {
-        std::lock_guard<std::recursive_mutex> guard(mutex());
-        auto session = state().ref_child(kRoot_Session);
-        session->set_string(kSession_Phase, new_phase);
-        session->set_number(kSession_PhaseChangedAt, now_ms());
-        session->ref_child(kSession_GameSession)
-            ->set_string(kGameSession_Phase, new_phase);
-        broadcast_state_patch();
-      });
+void MapRoom::grant_starting_inventory(
+    std::shared_ptr<schema::Node> character) {
+  std::string phase =
+      state().ref_child(kRoot_Session)->get_string(kSession_Phase);
+  auto inventory = character->ref_child(kChar_Inventory);
+  auto interactive_slots = inventory->map_child(kInv_InteractiveSlots);
+  auto slots_order = inventory->array_child(kInv_InteractiveSlotsOrder);
+  int slot_count =
+      static_cast<int>(game_settings_.value("interactiveItemsSlots", 4.0));
+
+  for (const Value &device : map_catalog_.devices()) {
+    if (device.value("type", std::string()) != "startingInventory")
+      continue;
+    const Value &props = device.value("properties", Value::object());
+    if (!props.value("enabled", true))
+      continue;
+    if (props.value("grantDuringPhase", std::string("game")) != phase)
+      continue;
+
+    std::string item_id = props.value("itemId", std::string());
+    if (item_id.empty())
+      continue;
+    double amount = props.value("itemAmount", 1.0);
+
+    for (int i = 1; i <= slot_count; i++) {
+      std::string key = std::to_string(i);
+      auto slot = interactive_slots->find(key);
+      if (slot && !slot->get_string(kSlot_ItemId).empty())
+        continue;
+      if (!slot)
+        slot = interactive_slots->get_or_create(key);
+      slot->set_string(kSlot_ItemId, item_id);
+      slot->set_number(kSlot_Count, amount);
+      slots_order->push_primitive(key);
+      if (props.value("equipOnGrant", false))
+        inventory->set_number(kInv_ActiveInteractiveSlot, i);
+      break;
+    }
+  }
+}
+
+void MapRoom::apply_spawn_positions() {
+  std::unordered_map<std::string, std::vector<std::pair<double, double>>>
+      pads_by_team;
+  std::vector<std::pair<double, double>> any_team_pads;
+
+  for (const Value &device : map_catalog_.devices()) {
+    if (device.value("type", std::string()) != "characterSpawnPad")
+      continue;
+    const Value &props = device.value("properties", Value::object());
+    if (props.value("phase", std::string()) != "Game")
+      continue;
+
+    double x = device.value("x", 0.0);
+    double y = device.value("y", 0.0);
+    std::string team_id = props.value("teamId", std::string("__ANY_TEAM__"));
+    if (team_id == "__ANY_TEAM__") {
+      any_team_pads.emplace_back(x, y);
+    } else {
+      pads_by_team[team_id].emplace_back(x, y);
+    }
+  }
+
+  auto characters = state().map_child(kRoot_Characters);
+  std::unordered_map<std::string, std::size_t> next_index;
+  for (const auto &entry : characters->entries()) {
+    if (!entry.alive)
+      continue;
+    std::string team_id = entry.value->get_string(kChar_TeamId);
+
+    std::vector<std::pair<double, double>> *pads = nullptr;
+    if (auto it = pads_by_team.find(team_id);
+        it != pads_by_team.end() && !it->second.empty()) {
+      pads = &it->second;
+    } else if (!any_team_pads.empty()) {
+      pads = &any_team_pads;
+    }
+    if (!pads)
+      continue;
+
+    std::size_t idx = next_index[team_id]++ % pads->size();
+    entry.value->set_number(kChar_X, (*pads)[idx].first);
+    entry.value->set_number(kChar_Y, (*pads)[idx].second);
+  }
+}
+
+void MapRoom::apply_game_start_devices(double countdown_end) {
+  std::string clock_mode =
+      game_settings_.value("gameClockMode", std::string("Off"));
+  Value changes = Value::array();
+
+  for (const Value &device : map_catalog_.devices()) {
+    std::string type = device.value("type", std::string());
+    const Value &props = device.value("properties", Value::object());
+
+    if (type == "prop" && props.contains("visibleOnGameStart")) {
+      Value entry_props = Value::object();
+      entry_props["GLOBAL_visible"] = props.at("visibleOnGameStart");
+      entry_props["GLOBAL_healthPercent"] = 1;
+      changes.push_back(Value{{"id", device.value("id", std::string())},
+                              {"properties", entry_props}});
+    } else if (type == "mapOptions") {
+      Value entry_props = Value::object();
+      entry_props["GLOBAL_gameMusicState"] = "playing";
+      if (clock_mode == "Count Down") {
+        entry_props["GLOBAL_countdownActive"] = true;
+        entry_props["GLOBAL_countdownEndTimestamp"] = countdown_end;
+        entry_props["GLOBAL_allowedToAddTimeToEndCountdown"] = true;
+      } else if (clock_mode == "Count Up") {
+        entry_props["GLOBAL_countupActive"] = true;
+        entry_props["GLOBAL_countupStartTimestamp"] = now_ms();
+      }
+      changes.push_back(Value{{"id", device.value("id", std::string())},
+                              {"properties", entry_props}});
+    }
+  }
+
+  broadcast("DEVICES_STATES_CHANGES", DeviceStateCompiler::encode(changes));
 }
 
 } // namespace openkit::colyseus

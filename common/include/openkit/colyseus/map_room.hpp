@@ -29,11 +29,12 @@ private:
   void handle_start_game(Client &client, const Value &data);
   void assign_teams(const std::string &owner_id, bool owner_as_spectator,
                     const Value &custom_teams);
+  void apply_spawn_positions();
+  void apply_game_start_devices(double countdown_end);
+  void grant_starting_inventory(std::shared_ptr<schema::Node> character);
 
   void schedule_tick();
   blueboat::TimerHandle tick_timer_;
-  void schedule_phase_change(const std::string &new_phase, double delay_ms);
-  blueboat::TimerHandle phase_timer_;
 
   IntentRegistry &intent_registry_;
   MapCatalog map_catalog_;
