@@ -10,6 +10,7 @@
 #include "blueboat/memory_storage.hpp"
 #include "blueboat/server.hpp"
 #include "openkit/catalog.hpp"
+#include "openkit/experience_registry.hpp"
 #include "openkit/gamemode_registry.hpp"
 #include "openkit/intent_registry.hpp"
 #include "openkit/matchmaker.hpp"
@@ -44,11 +45,25 @@ void print_usage(const char *argv0) {
             << "                     endpoints against this lobby server. Reuses --tls-cert/\n"
             << "                     --tls-key if given (needed for a real https gimkit page to\n"
             << "                     be able to fetch() it at all).\n"
-            << "  --public-url       Origin embedded as \"serverUrl\" in matchmaker responses -\n"
-            << "                     wherever this lobby server is actually reachable from the\n"
-            << "                     browser, e.g. https://localhost:4444. Required with\n"
-            << "                     --matchmaker-port; defaults to a best-effort localhost\n"
-            << "                     guess otherwise.\n\n"
+            << "  --public-url       Returned by find-server-to-host-game for 1D (blueboat)\n"
+            << "                     requests - wherever the --port WS listener is reachable\n"
+            << "                     from the browser, e.g. https://localhost:4444. Required\n"
+            << "                     with --matchmaker-port; defaults to a best-effort localhost\n"
+            << "                     guess otherwise.\n"
+            << "  --matchmaker-public-url\n"
+            << "                     Returned instead of --public-url for 2D ({\"source\":\"map\"})\n"
+            << "                     find-server-to-host-game requests - wherever THIS\n"
+            << "                     matchmaker's own --matchmaker-port is reachable from the\n"
+            << "                     browser, e.g. https://localhost:4461. 2D clients call\n"
+            << "                     /matchmake/create/MapRoom and connect via WS against\n"
+            << "                     whatever this returns, so it must point here, not at\n"
+            << "                     --public-url. Defaults to --public-url if omitted (only\n"
+            << "                     correct when both ports share a reachable origin).\n"
+            << "  --map-id           Fallback mapId for 2D \"MapRoom\" games whose experienceId\n"
+            << "                     isn't in the bundled experience registry\n"
+            << "                     (data/experiences.json) - lets ad-hoc testing work without\n"
+            << "                     a registry entry. Only one real map is vendored right now:\n"
+            << "                     638d48dde317560021c9547f (a captured snowbrawl session).\n\n"
             << "Available gamemodes: ";
   for (const auto &name : openkit::gamemode_names()) {
     std::cerr << name << " ";
@@ -78,6 +93,8 @@ int main(int argc, char **argv) {
   std::string tls_key_path;
   int matchmaker_port = 0;
   std::string public_url;
+  std::string matchmaker_public_url;
+  std::string map_id;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -103,6 +120,10 @@ int main(int argc, char **argv) {
       matchmaker_port = std::stoi(next_value());
     } else if (arg == "--public-url") {
       public_url = next_value();
+    } else if (arg == "--matchmaker-public-url") {
+      matchmaker_public_url = next_value();
+    } else if (arg == "--map-id") {
+      map_id = next_value();
     } else if (arg == "--help" || arg == "-h") {
       print_usage(argv[0]);
       return 0;
@@ -132,6 +153,7 @@ int main(int argc, char **argv) {
   }
 
   openkit::Catalog catalog = openkit::Catalog::load(gamemode->name);
+  openkit::ExperienceRegistry experience_registry = openkit::ExperienceRegistry::load();
 
   blueboat::Value default_questions;
   try {
@@ -166,7 +188,7 @@ int main(int argc, char **argv) {
   std::signal(SIGTERM, handle_signal);
 
   g_server->listen(port);
-  std::cout << "server-1d listening on " << (tls_enabled ? "wss" : "ws") << "://<host>:" << port << "/blueboat/ (gamemode: " << gamemode_name << ")" << std::endl;
+  std::cout << "server listening on " << (tls_enabled ? "wss" : "ws") << "://<host>:" << port << "/blueboat/ (gamemode: " << gamemode_name << ")" << std::endl;
 
   std::unique_ptr<openkit::MatchmakerServer> matchmaker;
   if (matchmaker_port != 0) {
@@ -177,14 +199,16 @@ int main(int argc, char **argv) {
 
     openkit::MatchmakerOptions matchmaker_options;
     matchmaker_options.public_url = public_url;
+    matchmaker_options.matchmaker_public_url = !matchmaker_public_url.empty() ? matchmaker_public_url : public_url;
     matchmaker_options.default_questions = default_questions;
     matchmaker_options.resolve_intent_extras = gamemode->resolve_intent_extras;
+    matchmaker_options.default_map_id = map_id;
     if (tls_enabled) {
       matchmaker_options.tls = blueboat::TlsOptions{tls_cert_path, tls_key_path};
     }
 
     try {
-      matchmaker = std::make_unique<openkit::MatchmakerServer>(*g_server, intent_registry, matchmaker_options);
+      matchmaker = std::make_unique<openkit::MatchmakerServer>(*g_server, intent_registry, experience_registry, matchmaker_options);
       matchmaker->listen(matchmaker_port);
     } catch (const std::exception &e) {
       std::cerr << "Failed to start matchmaker: " << e.what() << std::endl;

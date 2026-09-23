@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(openkit_server_1d CXX)
+project(openkit_server CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,5 +25,5 @@ cl_add_dep(gh:OpenKit-OSS/blueboat-cpp)
 add_subdirectory(common)
 add_subdirectory(gamemodes/tycoon)
 
-add_executable(openkit_server_1d main.cpp)
-target_link_libraries(openkit_server_1d PRIVATE openkit_common openkit_tycoon deps::blueboat-cpp::server)
+add_executable(openkit_server main.cpp)
+target_link_libraries(openkit_server PRIVATE openkit_common openkit_tycoon deps::blueboat-cpp::server)
