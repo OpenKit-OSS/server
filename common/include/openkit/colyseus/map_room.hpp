@@ -26,13 +26,19 @@ public:
 private:
   void handle_request_initial_world(Client &client);
   void handle_input(Client &client, const Value &data);
+  void handle_start_game(Client &client, const Value &data);
+  void assign_teams(const std::string &owner_id, bool owner_as_spectator,
+                    const Value &custom_teams);
 
   void schedule_tick();
   blueboat::TimerHandle tick_timer_;
+  void schedule_phase_change(const std::string &new_phase, double delay_ms);
+  blueboat::TimerHandle phase_timer_;
 
   IntentRegistry &intent_registry_;
   MapCatalog map_catalog_;
   Value game_options_ = Value::object();
+  Value game_settings_ = Value::object();
 };
 
 } // namespace openkit::colyseus

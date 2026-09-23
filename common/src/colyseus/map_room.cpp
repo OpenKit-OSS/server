@@ -208,6 +208,7 @@ void MapRoom::on_create(const Value &options) {
   if (hook_options.contains("teams")) {
     map_settings["teams"] = hook_options.at("teams");
   }
+  game_settings_ = map_settings;
   root.set_string(kRoot_MapSettings, map_settings.dump());
   root.map_child(kRoot_CustomAssets);
   root.ref_child(kRoot_Matchmaker)->set_string(kMatchmaker_GameCode, game_code);
@@ -228,7 +229,10 @@ void MapRoom::schedule_tick() {
       });
 }
 
-void MapRoom::on_dispose() { tick_timer_.clear(); }
+void MapRoom::on_dispose() {
+  tick_timer_.clear();
+  phase_timer_.clear();
+}
 
 void MapRoom::on_join(Client &client, const Value &options) {
   auto characters = state().map_child(kRoot_Characters);
@@ -316,6 +320,8 @@ void MapRoom::on_message(Client &client, const std::string &type,
     handle_request_initial_world(client);
   } else if (type == "INPUT") {
     handle_input(client, data);
+  } else if (type == "START_GAME") {
+    handle_start_game(client, data);
   }
 }
 
@@ -351,6 +357,103 @@ void MapRoom::handle_input(Client &client, const Value &data) {
   client.send(
       "PHYSICS_STATE",
       Value{{"x", x}, {"y", y}, {"physicsState", physics_state.dump()}});
+}
+
+void MapRoom::assign_teams(const std::string &owner_id,
+                           bool owner_as_spectator,
+                           const Value &custom_teams) {
+  std::string team_mode = game_settings_.value("teams", std::string("Free For All"));
+  if (team_mode == "Free For All")
+    return;
+
+  int teams_number = static_cast<int>(game_settings_.value("teamsNumber", 2.0));
+  if (teams_number < 1)
+    teams_number = 1;
+
+  auto teams = state().array_child(kRoot_Teams);
+  auto characters = state().map_child(kRoot_Characters);
+  if (teams_number > static_cast<int>(teams->entries().size()))
+    teams_number = static_cast<int>(teams->entries().size());
+
+  int next_team = 0;
+  for (const auto &entry : characters->entries()) {
+    if (!entry.alive)
+      continue;
+    const std::string &char_id = entry.key;
+    if (owner_as_spectator && char_id == owner_id)
+      continue;
+
+    std::string team_id;
+    if (custom_teams.contains(char_id) && custom_teams.at(char_id).is_string()) {
+      team_id = custom_teams.at(char_id).get<std::string>();
+    } else {
+      team_id = std::to_string((next_team % teams_number) + 1);
+      next_team++;
+    }
+
+    int idx = 0;
+    try {
+      idx = std::stoi(team_id);
+    } catch (...) {
+      continue;
+    }
+    if (idx < 1 || idx > static_cast<int>(teams->entries().size()))
+      continue;
+
+    entry.value->set_string(kChar_TeamId, team_id);
+    teams->entries()[idx - 1].ref->array_child(kTeam_Characters)->push_primitive(char_id);
+  }
+}
+
+void MapRoom::handle_start_game(Client &client, const Value &data) {
+  auto session = state().ref_child(kRoot_Session);
+  if (client.id() != session->get_string(kSession_GameOwnerId))
+    return;
+  if (session->get_string(kSession_Phase) != "preGame")
+    return;
+
+  bool owner_as_spectator = data.value("ownerAsSpectator", false);
+  Value custom_teams = data.value("customTeams", Value::object());
+  assign_teams(client.id(), owner_as_spectator, custom_teams);
+
+  std::string clock_mode = game_settings_.value("gameClockMode", std::string("Off"));
+  double countdown_minutes = game_settings_.value("countdownTimeMinutes", 0.0);
+  bool has_countdown = clock_mode == "Count Down" && countdown_minutes > 0;
+
+  double now = now_ms();
+  auto game_session = session->ref_child(kSession_GameSession);
+  session->set_number(kSession_PhaseChangedAt, now);
+  game_session->set_number(kGameSession_ResultsEnd, 0);
+
+  if (has_countdown) {
+    double countdown_end = now + countdown_minutes * 60000.0;
+    session->set_string(kSession_Phase, "countdown");
+    game_session->set_string(kGameSession_Phase, "countdown");
+    game_session->set_number(kGameSession_CountdownEnd, countdown_end);
+    schedule_phase_change("live", countdown_end - now);
+  } else {
+    session->set_string(kSession_Phase, "live");
+    game_session->set_string(kGameSession_Phase, "live");
+    game_session->set_number(kGameSession_CountdownEnd, 0);
+  }
+
+  broadcast_state_patch();
+}
+
+void MapRoom::schedule_phase_change(const std::string &new_phase, double delay_ms) {
+  if (delay_ms < 0)
+    delay_ms = 0;
+  phase_timer_ = blueboat::Scheduler::instance().set_timeout(
+      std::chrono::milliseconds(static_cast<long long>(delay_ms)),
+      [this, new_phase] {
+        std::lock_guard<std::recursive_mutex> guard(mutex());
+        auto session = state().ref_child(kRoot_Session);
+        session->set_string(kSession_Phase, new_phase);
+        session->set_number(kSession_PhaseChangedAt, now_ms());
+        session->ref_child(kSession_GameSession)
+            ->set_string(kGameSession_Phase, new_phase);
+        broadcast_state_patch();
+      });
 }
 
 } // namespace openkit::colyseus

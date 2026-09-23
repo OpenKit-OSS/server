@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "openkit/colyseus/device_compiler.hpp"
 #include "openkit/data_archive.hpp"
 
 namespace openkit {
@@ -20,14 +21,20 @@ Value load_json(const std::string &map_id, const std::string &file) {
 }  // namespace
 
 MapCatalog MapCatalog::load(const std::string &map_id) {
+  Value world_changes = load_json(map_id, "world_changes.json");
+  Value added_devices = world_changes.value("devices", Value::object())
+                             .value("addedDevices", Value::object());
+  Value devices = colyseus::DeviceCompiler::decode(added_devices);
+
   return MapCatalog(
       map_id,
       load_json(map_id, "world_options.json"),
-      load_json(map_id, "world_changes.json"),
+      world_changes,
       load_json(map_id, "terrain_changes.json"),
       load_json(map_id, "devices_states_changes.json"),
       load_json(map_id, "map_settings.json"),
-      load_json(map_id, "world.json"));
+      load_json(map_id, "world.json"),
+      devices);
 }
 
 }  // namespace openkit
