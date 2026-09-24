@@ -2,6 +2,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "blueboat/common/scheduler.hpp"
 #include "openkit/colyseus/room.hpp"
@@ -9,6 +10,19 @@
 #include "openkit/map_catalog.hpp"
 
 namespace openkit::colyseus {
+
+struct InFlightProjectile {
+  std::string id;
+  std::string owner_id;
+  std::string owner_team_id;
+  double start_x, start_y;
+  double dir_x, dir_y;
+  double speed;
+  double max_distance;
+  double damage;
+  double fragility;
+  double start_time_ms;
+};
 
 class MapRoom : public Room {
 public:
@@ -32,6 +46,8 @@ private:
   void handle_add_game_time(Client &client, const Value &data);
   void handle_end_game(Client &client, const Value &data);
   void handle_kick_player(Client &client, const Value &data);
+  void handle_fire(Client &client, const Value &data);
+  void tick_projectiles();
   void assign_teams(const std::string &owner_id, bool owner_as_spectator,
                     const Value &custom_teams);
   void apply_spawn_positions();
@@ -40,6 +56,7 @@ private:
 
   void schedule_tick();
   blueboat::TimerHandle tick_timer_;
+  std::vector<InFlightProjectile> in_flight_projectiles_;
 
   IntentRegistry &intent_registry_;
   MapCatalog map_catalog_;

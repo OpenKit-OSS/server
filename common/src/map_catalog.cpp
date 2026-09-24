@@ -135,7 +135,8 @@ MapCatalog MapCatalog::load(const std::string &map_id) {
 
   return MapCatalog(map_id, world_options, world_changes, terrain_changes,
                     load_json(map_id, "devices_states_changes.json"),
-                    map_settings, world, devices);
+                    map_settings, world, devices,
+                    bundle_map.value("terrain", Value::array()));
 }
 
 } // namespace openkit

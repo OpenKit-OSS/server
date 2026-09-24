@@ -1,0 +1,6 @@
+{
+  "vendingMachine": {
+    "requiresOption": "visibleInGame",
+    "box": {"x": 0, "y": -15, "widthOption": "width", "heightOption": "height", "heightAdjust": -30}
+  }
+}

@@ -22,7 +22,8 @@ Value load_catalog(const std::string &file) {
 GameCatalog::GameCatalog()
     : props_(load_catalog("props.json")), items_(load_catalog("items.json")),
       devices_(load_catalog("devices.json")),
-      terrain_(load_catalog("terrain.json")) {}
+      terrain_(load_catalog("terrain.json")),
+      device_colliders_(load_catalog("device_colliders.json")) {}
 
 const GameCatalog &GameCatalog::instance() {
   static const GameCatalog catalog;

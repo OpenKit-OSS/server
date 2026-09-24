@@ -15,6 +15,8 @@ public:
   const Value &devices() const { return devices_; }
   const Value &terrain() const { return terrain_; }
 
+  const Value &device_colliders() const { return device_colliders_; }
+
 private:
   GameCatalog();
 
@@ -22,6 +24,7 @@ private:
   Value items_;
   Value devices_;
   Value terrain_;
+  Value device_colliders_;
 };
 
 } // namespace openkit

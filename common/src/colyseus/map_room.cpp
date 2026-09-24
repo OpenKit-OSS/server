@@ -1,12 +1,16 @@
 #include "openkit/colyseus/map_room.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "blueboat/common/random_id.hpp"
 #include "openkit/colyseus/auth_token.hpp"
 #include "openkit/colyseus/device_state_compiler.hpp"
+#include "openkit/game_catalog.hpp"
 
 namespace openkit::colyseus {
 
@@ -139,10 +143,182 @@ enum InventorySlotField { kInvSlot_Amount = 0 };
 enum MatchmakerField { kMatchmaker_GameCode = 0 };
 enum HooksField { kHooks_HookJSON = 0 };
 
-int default_clip_size(const std::string &item_id) {
-  if (item_id.rfind("snowball_launcher_", 0) == 0)
-    return 16;
-  return 0;
+struct WeaponStats {
+  int clip_size;
+  double damage;
+  double speed;
+  double max_distance;
+  double radius;
+  double muzzle_forward_offset;
+  double muzzle_vertical_offset;
+};
+
+const std::unordered_map<std::string, WeaponStats> &snowball_launcher_stats() {
+  static const std::unordered_map<std::string, WeaponStats> table = {
+      {"snowball_launcher_common", {12, 28, 6.70, 10.0, 0.225, 0.95, -0.2}},
+      {"snowball_launcher_uncommon", {14, 30, 6.70, 10.0, 0.225, 0.95, -0.2}},
+      {"snowball_launcher_rare", {16, 32, 6.70, 10.0, 0.225, 0.95, -0.2}},
+      {"snowball_launcher_epic", {18, 34, 6.70, 10.0, 0.225, 0.95, -0.2}},
+      {"snowball_launcher_legendary", {20, 36, 6.70, 10.0, 0.225, 0.95, -0.2}},
+  };
+  return table;
+}
+
+// TODO: support more weapons
+const WeaponStats *find_weapon_stats(const std::string &item_id) {
+  const auto &table = snowball_launcher_stats();
+  auto it = table.find(item_id);
+  return it != table.end() ? &it->second : nullptr;
+}
+
+constexpr double kPi = 3.14159265358979323846;
+
+struct Point2 {
+  double x, y;
+};
+
+Point2 rotate(double x, double y, double radians) {
+  double c = std::cos(radians), s = std::sin(radians);
+  return {x * c - y * s, x * s + y * c};
+}
+
+bool point_hits_prop(double px, double py, double point_radius,
+                     const Value &device) {
+  if (device.value("type", std::string()) != "prop")
+    return false;
+  const Value &props = device.value("properties", Value::object());
+  if (!props.value("UseColliders", true))
+    return false;
+
+  std::string prop_id = props.value("propId", std::string());
+  const Value &catalog = GameCatalog::instance().props();
+  if (!catalog.contains(prop_id))
+    return false;
+
+  const Value &catalog_entry = catalog.at(prop_id);
+  double catalog_scale = catalog_entry.value("scale", 1.0);
+  double scale = catalog_scale * props.value("Scale", 1.0) / 100.0;
+  double angle_rad = props.value("Angle", 0.0) * kPi / 180.0;
+  double prop_x = device.value("x", 0.0) / 100.0;
+  double prop_y = device.value("y", 0.0) / 100.0;
+
+  const Value &image = catalog_entry.value("image", Value::object());
+  double image_w = image.value("width", 0.0);
+  double image_h = image.value("height", 0.0);
+  double origin_offset_x =
+      (catalog_entry.value("originX", 0.5) - 0.5) * image_w;
+  double origin_offset_y =
+      (catalog_entry.value("originY", 0.5) - 0.5) * image_h;
+
+  const Value &colliders = catalog_entry.value("colliders", Value::object())
+                               .value("topDown", Value::object());
+
+  for (const Value &c : colliders.value("circle", Value::array())) {
+    Point2 offset =
+        rotate((c.value("x", 0.0) - origin_offset_x) * scale,
+               (c.value("y", 0.0) - origin_offset_y) * scale, angle_rad);
+    double radius = c.value("radius", 0.0) * scale;
+    if (std::hypot(px - (prop_x + offset.x), py - (prop_y + offset.y)) <=
+        radius + point_radius)
+      return true;
+  }
+
+  for (const Value &c : colliders.value("capsule", Value::array())) {
+    Point2 offset =
+        rotate((c.value("x", 0.0) - origin_offset_x) * scale,
+               (c.value("y", 0.0) - origin_offset_y) * scale, angle_rad);
+    double cx = prop_x + offset.x, cy = prop_y + offset.y;
+    double radius = c.value("radius", 0.0) * scale;
+    double half_height = c.value("halfHeight", 0.0) * scale;
+    double total_angle = angle_rad + c.value("angle", 0.0) * kPi / 180.0;
+    Point2 local = rotate(px - cx, py - cy, -total_angle);
+    double clamped_y = std::clamp(local.y, -half_height, half_height);
+    if (std::hypot(local.x, local.y - clamped_y) <= radius + point_radius)
+      return true;
+  }
+
+  for (const Value &c : colliders.value("rectangle", Value::array())) {
+    Point2 offset =
+        rotate((c.value("x", 0.0) - origin_offset_x) * scale,
+               (c.value("y", 0.0) - origin_offset_y) * scale, angle_rad);
+    double cx = prop_x + offset.x, cy = prop_y + offset.y;
+    double half_w = c.value("width", 0.0) * scale / 2.0 + point_radius;
+    double half_h = c.value("height", 0.0) * scale / 2.0 + point_radius;
+    double total_angle = angle_rad + c.value("angle", 0.0) * kPi / 180.0;
+    Point2 local = rotate(px - cx, py - cy, -total_angle);
+    if (std::abs(local.x) <= half_w && std::abs(local.y) <= half_h)
+      return true;
+  }
+
+  return false;
+}
+
+bool point_hits_device(double px, double py, double point_radius,
+                       const Value &device) {
+  const Value &colliders = GameCatalog::instance().device_colliders();
+  std::string type = device.value("type", std::string());
+  if (!colliders.contains(type))
+    return false;
+
+  const Value &spec = colliders.at(type);
+  const Value &props = device.value("properties", Value::object());
+  std::string requires_option = spec.value("requiresOption", std::string());
+  if (!requires_option.empty() && !props.value(requires_option, false))
+    return false;
+
+  const Value &box = spec.value("box", Value::object());
+  double cx = device.value("x", 0.0) / 100.0 + box.value("x", 0.0) / 100.0;
+  double cy = device.value("y", 0.0) / 100.0 + box.value("y", 0.0) / 100.0;
+  double width = props.value(box.value("widthOption", std::string()), 0.0);
+  double height = props.value(box.value("heightOption", std::string()), 0.0) +
+                  box.value("heightAdjust", 0.0);
+  double half_w = width / 100.0 / 2.0 + point_radius;
+  double half_h = height / 100.0 / 2.0 + point_radius;
+
+  return std::abs(px - cx) <= half_w && std::abs(py - cy) <= half_h;
+}
+
+bool point_hits_any_prop(double px, double py, double point_radius,
+                         const Value &devices) {
+  for (const Value &device : devices) {
+    if (point_hits_prop(px, py, point_radius, device) ||
+        point_hits_device(px, py, point_radius, device))
+      return true;
+  }
+  return false;
+}
+
+constexpr double kTerrainTileSize = 0.64;
+
+bool point_hits_terrain(double px, double py, double point_radius,
+                        const Value &terrain_tiles) {
+  for (const Value &tile : terrain_tiles) {
+    if (!tile.value("collides", false))
+      continue;
+    double x0 = tile.value("x", 0.0) * kTerrainTileSize;
+    double y0 = tile.value("y", 0.0) * kTerrainTileSize;
+    double closest_x = std::clamp(px, x0, x0 + kTerrainTileSize);
+    double closest_y = std::clamp(py, y0, y0 + kTerrainTileSize);
+    if (std::hypot(px - closest_x, py - closest_y) <= point_radius)
+      return true;
+  }
+  return false;
+}
+
+double raycast_static_stop_distance(double start_x, double start_y,
+                                    double dir_x, double dir_y,
+                                    double max_distance, double point_radius,
+                                    const Value &devices,
+                                    const Value &terrain_tiles) {
+  constexpr double kStep = 0.05;
+  for (double d = kStep; d <= max_distance; d += kStep) {
+    double x = start_x + dir_x * d;
+    double y = start_y + dir_y * d;
+    if (point_hits_any_prop(x, y, point_radius, devices) ||
+        point_hits_terrain(x, y, point_radius, terrain_tiles))
+      return d;
+  }
+  return max_distance;
 }
 
 constexpr int kRootClass = 0;
@@ -245,6 +421,7 @@ void MapRoom::schedule_tick() {
         state()
             .ref_child(kRoot_Session)
             ->set_number(kSession_GameTime, now_ms());
+        tick_projectiles();
         broadcast_state_patch();
         schedule_tick();
       });
@@ -367,6 +544,8 @@ void MapRoom::on_message(Client &client, const std::string &type,
     handle_end_game(client, data);
   } else if (type == "KICK_PLAYER") {
     handle_kick_player(client, data);
+  } else if (type == "FIRE") {
+    handle_fire(client, data);
   }
 }
 
@@ -550,7 +729,8 @@ void MapRoom::grant_starting_inventory(
       auto slot = interactive_slots->find(std::to_string(i));
       if (!slot || !slot->get_string(kSlot_ItemId).empty())
         continue;
-      int clip_size = default_clip_size(item_id);
+      const WeaponStats *stats = find_weapon_stats(item_id);
+      int clip_size = stats ? stats->clip_size : 0;
       slot->set_string(kSlot_ItemId, item_id);
       slot->set_number(kSlot_Count, amount);
       slot->set_number(kSlot_CurrentClip, clip_size);
@@ -727,6 +907,150 @@ void MapRoom::handle_kick_player(Client &client, const Value &data) {
 
   target->send("GOT_KICKED");
   target->close();
+}
+
+void MapRoom::handle_fire(Client &client, const Value &data) {
+  auto characters = state().map_child(kRoot_Characters);
+  auto character = characters->find(client.id());
+  if (!character)
+    return;
+
+  auto inventory = character->ref_child(kChar_Inventory);
+  int active_slot =
+      static_cast<int>(inventory->get_number(kInv_ActiveInteractiveSlot));
+  if (active_slot <= 0)
+    return;
+  auto interactive_slots = inventory->map_child(kInv_InteractiveSlots);
+  auto slot = interactive_slots->find(std::to_string(active_slot));
+  if (!slot)
+    return;
+
+  std::string item_id = slot->get_string(kSlot_ItemId);
+  const WeaponStats *stats = find_weapon_stats(item_id);
+  if (!stats || slot->get_number(kSlot_CurrentClip) <= 0)
+    return;
+
+  slot->set_number(kSlot_CurrentClip, slot->get_number(kSlot_CurrentClip) - 1);
+  broadcast_state_patch();
+
+  double angle = data.value("angle", 0.0);
+  double char_x = character->get_number(kChar_X) / 100.0;
+  double char_y = character->get_number(kChar_Y) / 100.0;
+  double start_x = char_x + std::cos(angle) * stats->muzzle_forward_offset;
+  double start_y = char_y + std::sin(angle) * stats->muzzle_forward_offset +
+                   stats->muzzle_vertical_offset;
+  double end_x = start_x + std::cos(angle) * stats->max_distance;
+  double end_y = start_y + std::sin(angle) * stats->max_distance;
+
+  double now = now_ms();
+  double travel_seconds = stats->max_distance / stats->speed;
+  double end_time = now + travel_seconds * 1000.0;
+  double fragility = game_settings_.value("startingFragility", 0.0);
+  std::string owner_team_id = character->get_string(kChar_TeamId);
+  std::string projectile_id = blueboat::random_id(9);
+
+  double dir_x = std::cos(angle), dir_y = std::sin(angle);
+  double static_stop = raycast_static_stop_distance(
+      start_x, start_y, dir_x, dir_y, stats->max_distance, 0.0,
+      map_catalog_.devices(), map_catalog_.terrain());
+  double hit_x = start_x + dir_x * static_stop;
+  double hit_y = start_y + dir_y * static_stop;
+  double hit_time = now + (static_stop / stats->speed) * 1000.0;
+
+  Value projectile{
+      {"id", projectile_id},
+      {"startTime", now},
+      {"endTime", end_time},
+      {"start", Value{{"x", start_x}, {"y", start_y}}},
+      {"end", Value{{"x", end_x}, {"y", end_y}}},
+      {"radius", stats->radius},
+      {"hitTime", hit_time},
+      {"hitPos", Value{{"x", hit_x}, {"y", hit_y}}},
+      {"appearance", "snowball"},
+      {"ownerId", client.id()},
+      {"ownerTeamId", owner_team_id},
+      {"canDamagePlayersWhenPvpDisabled", false},
+      {"damage", stats->damage},
+      {"hitTimeFragility", fragility},
+  };
+  Value added = Value::array();
+  added.push_back(projectile);
+  broadcast("PROJECTILE_CHANGES",
+            Value{{"added", added}, {"hit", Value::array()}});
+
+  in_flight_projectiles_.push_back(InFlightProjectile{
+      projectile_id, client.id(), owner_team_id, start_x, start_y, dir_x, dir_y,
+      stats->speed, static_stop, stats->damage, fragility, now});
+}
+
+void MapRoom::tick_projectiles() {
+  if (in_flight_projectiles_.empty())
+    return;
+
+  // TODO: more accurate player hitbox
+  constexpr double kCharacterHitRadius = 0.183;
+  bool pvp_enabled = game_settings_.value("playerVsPlayerDamageEnabled", true);
+  auto characters = state().map_child(kRoot_Characters);
+  double now = now_ms();
+
+  std::vector<InFlightProjectile> still_flying;
+  for (auto &p : in_flight_projectiles_) {
+    double elapsed_s = (now - p.start_time_ms) / 1000.0;
+    double traveled = std::min(p.speed * elapsed_s, p.max_distance);
+    double cur_x = p.start_x + p.dir_x * traveled;
+    double cur_y = p.start_y + p.dir_y * traveled;
+
+    std::shared_ptr<schema::Node> hit_character;
+    std::string hit_character_id;
+    if (pvp_enabled) {
+      for (const auto &entry : characters->entries()) {
+        if (!entry.alive || entry.key == p.owner_id)
+          continue;
+        std::string target_team = entry.value->get_string(kChar_TeamId);
+        if (p.owner_team_id != "__NO_TEAM_ID" && target_team == p.owner_team_id)
+          continue;
+        double px = entry.value->get_number(kChar_X) / 100.0;
+        double py = entry.value->get_number(kChar_Y) / 100.0;
+        if (std::hypot(px - cur_x, py - cur_y) <= kCharacterHitRadius) {
+          hit_character = entry.value;
+          hit_character_id = entry.key;
+          break;
+        }
+      }
+    }
+
+    bool reached_end = traveled >= p.max_distance;
+    if (!hit_character && !reached_end) {
+      still_flying.push_back(p);
+      continue;
+    }
+    if (!hit_character)
+      continue;
+
+    auto health = hit_character->ref_child(kChar_Health);
+    double shield = health->get_number(kHealth_Shield);
+    std::string hit_type;
+    if (shield > 0) {
+      health->set_number(kHealth_Shield, std::max(0.0, shield - p.damage));
+      hit_type = "s";
+    } else {
+      double hp = health->get_number(kHealth_Health);
+      health->set_number(kHealth_Health, std::max(0.0, hp - p.damage));
+      hit_type = "h";
+    }
+
+    Value hits = Value::array();
+    hits.push_back(Value{{"characterId", hit_character_id},
+                         {"damage", p.damage},
+                         {"type", hit_type},
+                         {"hitTimeFragility", p.fragility}});
+    Value hit_list = Value::array();
+    hit_list.push_back(
+        Value{{"id", p.id}, {"x", cur_x}, {"y", cur_y}, {"hits", hits}});
+    broadcast("PROJECTILE_CHANGES",
+              Value{{"added", Value::array()}, {"hit", hit_list}});
+  }
+  in_flight_projectiles_ = std::move(still_flying);
 }
 
 } // namespace openkit::colyseus
